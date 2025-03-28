@@ -32,6 +32,7 @@ class MicrogripperParamTuner:
         # Parameters with default values
         self.params = {
             # Thresholding params
+            # Adaptive thresholding params
             "adaptive_block_size": 135,
             "adaptive_constant": -6,
             
@@ -175,7 +176,7 @@ class MicrogripperParamTuner:
             self.ros_enabled_var = tk.BooleanVar(value=True)
             ttk.Checkbutton(ros_frame, text="Enable ROS Feed", 
                            variable=self.ros_enabled_var).pack(anchor=tk.W, padx=5)
-        
+
         # Group thresholding parameters
         thresh_frame = ttk.LabelFrame(scroll_frame, text="Thresholding")
         thresh_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -337,7 +338,8 @@ class MicrogripperParamTuner:
         
         # Convert to grayscale
         gray = cv2.cvtColor(img_to_process, cv2.COLOR_BGR2GRAY)
-        
+  
+
         # Apply bilateral filter if enabled
         if self.params["use_bilateral_filter"]:
             gray = cv2.bilateralFilter(
