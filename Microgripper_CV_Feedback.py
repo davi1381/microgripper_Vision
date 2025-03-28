@@ -22,8 +22,8 @@ import cv2 # pip install opencv-python
 last_timestamps = []
 last_positions = []
 last_angles = []
-skiped_counter = 0
-
+skipped_counter = 0
+q,w,e,r,t,y = 0, 0, 0, 0, 0, 0  # Initialize counters for debugging 
 PixelToMM = 2.5 / 1280.0  # Conversion factor from pixels to mm (assuming 1280 pixels in width)
 
 
@@ -174,13 +174,13 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
     max_angle_deviation = 90  # degrees
     MAX_AREA = 100000 
     MIN_AREA = 25000 
-    
+    global q,w,e,r,t,y
 
     kernel = np.ones((3,3))
     SEARCH_AREA = 175
     cropping = False
     bot_rect = None
-    j = 0
+
     area_threshold = 10.0e6  # 20% threshold for contour area change
     
     # Position and angle outlier rejection thresholds
@@ -191,22 +191,25 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
     # 14umTest3 works
     
     start_time = time.time()
-    j = j + 1
+
     
     #color = cv2.resize(color, (1280, 720), interpolation=cv2.INTER_AREA)
     frame = cv2.cvtColor(cvImage, cv2.COLOR_BGR2GRAY)
     
     # Adjust picture contrast / equalize it? 
-    #blurred = cv2.bilateralFilter(frame,5,10,10)
-    edges = cv2.adaptiveThreshold(frame, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY,135,-6)
+    blurred = cv2.bilateralFilter(frame,5,10,10)
+    edges = cv2.Canny(frame, threshold1=100, threshold2=100)
+
+    edges = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY,51,-6)
     
-    edges = cv2.erode(edges, kernel)
+    edges = cv2.erode(edges, kernel, iterations=2)  # Erode to remove noise
     edges = cv2.dilate(edges, kernel, iterations=5)
     edges = cv2.erode(edges, kernel, iterations=3)
-    #edges = cv2.dilate(edges, kernel, iterations=1)
-    
-    #edges = cv2.bitwise_or(edges, edges_orig)
-    
+    edges = cv2.dilate(edges, kernel, iterations=4)
+    # #edges = cv2.bitwise_or(edges, edges_orig)
+    # cv2.imshow('Original Image', cvImage)
+    # cv2.imshow('Canny Edges', edges)
+    #cv2.waitKey(2)
     crop_mask = np.zeros_like(edges)
     
     # If we have predictions, use them for cropping to improve processing speed and accuracy
@@ -228,7 +231,6 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
 
     contours, hierarchy = cv2.findContours(edges, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     current_contour_area = None
-    
     if contours:
         #! error check contours size
         sortedPairs = sorted(zip(contours, hierarchy[0]), key=lambda pair: cv2.contourArea(pair[0]), reverse=True)[:6]
@@ -278,8 +280,9 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                                 if distance_to_prediction > max_position_deviation:
                                     print(f"Position outlier rejected: ({cx:.1f}, {cy:.1f}) - too far from prediction: {distance_to_prediction:.2f}px")
                                     is_outlier = True
-                                    skipped_counter +=1
+                                    skipped_counter +=0.0001
                                     continue
+                            
 
                            
                             # Also perform traditional statistical outlier rejection
@@ -292,7 +295,7 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                                 if z_area > area_threshold:  # 3 standard deviations
                                     print(f"Area outlier rejected: {area:.0f} - z-score: {z_area:.2f}")
                                     is_outlier = True
-                                    skipped_counter +=1
+                                    skipped_counter +=0.000001
                                     continue 
                             # Calculate statistics for centroids
                             centroids_array = np.array(centroids)
@@ -309,11 +312,9 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                                 if z_x > position_threshold or z_y > position_threshold:
                                     print(f"Position outlier rejected: ({cx:.1f}, {cy:.1f}) - z-scores: x={z_x:.2f}, y={z_y:.2f}")
                                     is_outlier = True
-                                    skipped_counter +=1
+                                    skipped_counter +=0.00000001
                                     continue 
-                        
-
-                    
+                                             
                     # Skip this contour if it's an outlier
                     if is_outlier:
                         openColor = (0, 0, 255)  # red
@@ -347,7 +348,7 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                     
         #field = cv2.approxPolyDP(contours[0], 0.11 * cv2.arcLength(contours[0], True), True)    # add this in maybe 
         
-        if bot_rect:   
+        if bot_rect:
             thetas = []    
             lengths = []   
             for i in range(len(simple_hull)):
@@ -408,7 +409,7 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
             z_angle = angle_diff / std_angle if std_angle > 0 else 10
             if z_angle > angle_threshold:
                 print(f"Angle outlier rejected: {angle:.1f}° - z-score: {z_angle:.2f}")
-                skipped_counter +=1
+                skipped_counter +=0.1
                 return cvImage, openColor, centroids, angles, areas, openlengths
 
             else:
@@ -432,14 +433,15 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                 tipr_tuple = tuple(tipr.astype(int))
                 centroidtuple = tuple(map(int,centroids[-1]))
 
-
+                cv2.circle(cvImage, tuple([0,0]), radius = 6, color=(255,255,255), thickness= -1)  # draw the tips
                 cv2.circle(cvImage, tipl_tuple, radius = 6, color=openColor, thickness= -1)
                 cv2.circle(cvImage, tipr_tuple, radius = 6, color=openColor, thickness= -1)
                 cv2.circle(cvImage, centroidtuple, radius = 6, color=(0,225,225), thickness= -1)
                 cv2.drawContours(cvImage, [simple_hull], 0, openColor, 2)    
     else:
+        cv2.imshow(cvImage, "No contours found")
         print("No robot contours found.")
-    
+    #print(f"{q:0.2f} {w/q:0.2f} {e/q:0.2f} {r/q:0.2f} {t/q:0.2f} {y/q:0.2f} - Skipped Counter: {skipped_counter:.12f}")
     # Visualize prediction if available
     if predicted_centroid is not None and bot_rect is not None:
         pred_cx, pred_cy = predicted_centroid
@@ -452,16 +454,13 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                     color=(255, 0, 255), thickness=1)
     
     #cv2.imshow("Video", color)
-    #cv2.imshow("Edges", edges)
-    #cv2.imshow("Histogram", equ)
+    cv2.imshow("Edges", edges)
     end_time = time.time()
-    #print((end_time-start_time)*1000)
+    print((end_time-start_time)*1000)
     return cvImage, openColor, centroids, angles, areas, openlengths, timestamps
 
 def publish_pose(publisher, x, y, theta, opening, timestamp=None):
-        # Convert the orientation to quaternion (only around z-axis)
         try:
-            # x and y are already centered (adjusted in image_callback)
             
             # Convert to mm 
             x = x * PixelToMM
@@ -516,6 +515,9 @@ def image_callback(msg):
             cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA))
             if cv2.waitKey(2) & 0xFF == ord(' '):
                 cv2.destroyAllWindows()
+    elif processed_img is not None:
+        cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA))
+
 
 def main():
     rospy.init_node('image_processor_node', anonymous=True)
