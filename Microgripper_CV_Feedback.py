@@ -33,7 +33,7 @@ last_positions = []
 last_angles = []
 skipped_counter = 0
 q,w,e,r,t,y = 0, 0, 0, 0, 0, 0  # Initialize counters for debugging 
-PixelToMM = 2.5 / 1280.0  # Conversion factor from pixels to mm (assuming 1280 pixels in width)
+PixelToMM = 0.00315 # Conversion factor from pixels to mm (assuming 1600 pixels in width)
 
 
 # Global variable to track the time of the last received image
@@ -671,13 +671,13 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                 skipped_counter = 0
                 
             if len(tipl) != 0 and len(tipr) != 0:
-                openlength = np.linalg.norm(tipl - tipr)
+                openlength = np.linalg.norm(tipl - tipr)*1000/150 # Convert to um if needed, adjust scaling factor as per your calibration
                 if len(openlengths) >= 5:
                     avg_openlength = np.mean(openlengths)
                     std_openlength = np.std(openlengths)
                     if std_openlength > 0:
                         z_openlength = abs(openlength - avg_openlength) / std_openlength
-                        if z_openlength <= 3.0:  # Accept if within 3 standard deviations
+                        if z_openlength <= 5.0:  # Accept if within 3 standard deviations
                             openlengths.append(openlength)
                             openlengths.pop(0)
                     else:
@@ -685,7 +685,8 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                         openlengths.pop(0)
                 else:
                     openlengths.append(openlength)
-                    
+                # print(f"cx,cy:({cx},{cy})")
+
                 # Draw visualization elements
                 tipl_tuple = tuple(tipl.astype(int))
                 tipr_tuple = tuple(tipr.astype(int))
@@ -697,7 +698,17 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                 
                 # Draw centroid
                 cv2.circle(cvImage, centroidtuple, radius=6, color=(0, 225, 225), thickness=-1)
-                
+                # draw cordinate system
+                x = cvImage.shape[1] / 2  # Adjust x to have 0,0 at the center of the image
+                y = cvImage.shape[0] / 2  # Adjust y to have 0,0 at the center of the image
+
+                # cv2.arrowedLine(cvImage, (int(x), int(y)), (int(x+1/PixelToMM), int(y)), (225, 0, 0), 2)  # X-axis
+                cv2.arrowedLine(cvImage, (int(x), int(y)), (int(x+(1/PixelToMM)/2), int(y)), (225, 0, 0), 2)  # X-axis
+                cv2.arrowedLine(cvImage, (int(x), int(y)), (int(x), int(y-1/PixelToMM/2)), (225, 0, 0), 2)  # Y-axis
+                cv2.putText(cvImage, "X", (int(x+15), int(y-50)), cv2.FONT_HERSHEY_SIMPLEX, 1, (225, 0, 0), 1)
+                cv2.putText(cvImage, "Y", (int(x+50), int(y-15)), cv2.FONT_HERSHEY_SIMPLEX, 1, (225, 0, 0), 1)
+                cv2.circle(cvImage, (int(x), int(y)), radius=3, color=(225, 0, 0), thickness=-1)  # Origin point
+
                 # Add text showing the opening distance
                 cv2.putText(cvImage, f"Opening: {openlength:.1f}px", (10, 150),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
@@ -737,14 +748,15 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
 
 def publish_pose(publisher, x, y, theta, opening, timestamp=None):
         try:
-            
+            # print(f"x,y:({x},{y})")
+
             # Convert to mm 
             x = x * PixelToMM
             y = y * PixelToMM
             
             # convert to radians
             # print("theta", theta)
-            theta = math.radians(90-theta)
+            theta = math.radians(-theta-90)
             
             # Convert to quaternion  
             z = 0
@@ -786,7 +798,7 @@ def image_callback(msg):
     if (processed_img is not None and centroids):
         if timestamps[-1] == timestamp_sec:
             x = centroids[-1][0] - cv_image.shape[1] / 2  # Adjust x to have 0,0 at the center of the image
-            y = centroids[-1][1] - cv_image.shape[0] / 2  # Adjust y to have 0,0 at the center of the image
+            y = -centroids[-1][1] + cv_image.shape[0] / 2  # Adjust y to have 0,0 at the center of the image
             publish_pose(publisher, x, y, angles[-1], openlengths[-1], timestamp)
             cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA))
             if cv2.waitKey(3) & 0xFF == ord(' '):
