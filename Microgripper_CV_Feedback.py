@@ -33,8 +33,12 @@ last_positions = []
 last_angles = []
 skipped_counter = 0
 q,w,e,r,t,y = 0, 0, 0, 0, 0, 0  # Initialize counters for debugging 
-PixelToMM = 0.00315 # Conversion factor from pixels to mm (assuming 1600 pixels in width)
+PixelToMM = 0.003187 # Conversion factor from pixels to mm (assuming 1600 pixels in width)
 
+# Apply scale correction factor to match simulation scale
+# This value can be adjusted if the ROS image scale doesn't match the simulation scale
+scale_correction_factor = 1.0  # Adjust this value as needed to match simulation scale
+PixelToMM = PixelToMM * scale_correction_factor
 
 # Global variable to track the time of the last received image
 last_image_time = time.time()
@@ -53,145 +57,74 @@ def timeout_callback(event):
 # New function to predict next position and angle based on weighted average of changes
 def predict_next_values(centroids, angles, timestamp=None):
     """
-    Predicts the next centroid and angle values based on the weighted average 
-    of changes in the last measurements.
-    
-    Args:
-        centroids: List of (x, y) tuples for past centroids
-        angles: List of past angle values (in degrees)
-        timestamp: Current timestamp for time-based prediction
-        
-    Returns:
-        predicted_centroid: (x, y) tuple with predicted position
-        predicted_angle: Predicted angle in degrees
+    Predicts the next centroid and angle values using more robust methods
     """
-    global last_timestamps, last_positions, last_angles
-    
     # Need at least 2 measurements to calculate changes
-    if len(centroids) < 2:
+    if len(centroids) < 2 or len(angles) < 2:
         return centroids[-1] if centroids else None, angles[-1] if angles else None
     
-    # Create numpy arrays for easier computation
-    centroids_array = np.array(centroids)
+    # For angles, convert to sin/cos representation to avoid wraparound issues
+    angles_rad = np.radians(angles)
+    sin_vals = np.sin(angles_rad)
+    cos_vals = np.cos(angles_rad)
     
-    # Calculate position changes between consecutive measurements
-    position_diffs = np.diff(centroids_array, axis=0)
+    # Calculate weighted average of recent values (not differences)
+    # This creates a more stable prediction that's less affected by noise
+    weights = np.exp(np.linspace(0, 2, len(angles)))  # Exponential weights
+    weights = weights / np.sum(weights)  # Normalize
     
-    # Calculate angle changes (handling wraparound at 360 degrees)
-    angle_diffs = []
-    for i in range(1, len(angles)):
-        diff = angles[i] - angles[i-1]
-        # Handle wraparound (e.g., 350° to 10° should be +20° not -340°)
-        if diff > 180:
-            diff -= 360
-        elif diff < -180:
-            diff += 360
-        angle_diffs.append(diff)
+    # Use slightly more weight on older values to stabilize prediction
+    weighted_sin = np.sum(weights * sin_vals)
+    weighted_cos = np.sum(weights * cos_vals)
     
-    # Assign weights - more recent changes get higher weights
-    # We'll use an exponential weighting scheme
-    num_changes = len(position_diffs)
-    weights = np.exp(np.linspace(0, 1, num_changes))
-    weights = weights / np.sum(weights)  # Normalize weights to sum to 1
+    # Convert back to angle
+    predicted_angle = np.degrees(np.arctan2(weighted_sin, weighted_cos)) % 360
     
-    # Calculate weighted average position change
-    weighted_pos_change = np.zeros(2)
-    for i in range(num_changes):
-        weighted_pos_change += weights[i] * position_diffs[i]
+    # For position, keep the existing approach but use weighted average
+    pos_weights = np.exp(np.linspace(0, 1, len(centroids)))
+    pos_weights = pos_weights / np.sum(pos_weights)
     
-    # Calculate weighted average angle change
-    weighted_angle_change = 0
-    for i in range(len(angle_diffs)):
-        weighted_angle_change += weights[i] * angle_diffs[i]
+    # Weighted centroid (more stable than velocity approach)
+    weighted_centroid = np.zeros(2)
+    for i in range(len(centroids)):
+        weighted_centroid += pos_weights[i] * np.array(centroids[i])
     
-    # Generate predictions
-    predicted_centroid = centroids[-1] + weighted_pos_change
-    predicted_angle = angles[-1] + weighted_angle_change
-    
-    # Normalize angle to [0, 360] range
-    predicted_angle = predicted_angle % 360
-    
-    # If timestamp is provided, we can do time-based prediction
-    if timestamp is not None and last_timestamps and timestamp > last_timestamps[-1]:
-        # Store timestamp and position for future use
-        if len(last_timestamps) >= 5:
-            last_timestamps.pop(0)
-            last_positions.pop(0)
-            last_angles.pop(0)
-            
-        last_timestamps.append(timestamp)
-        last_positions.append(centroids[-1])
-        last_angles.append(angles[-1])
+    # Apply a small velocity component to the prediction
+    if len(centroids) >= 3:
+        recent_velocity = np.array(centroids[-1]) - np.array(centroids[-2])
+        predicted_centroid = weighted_centroid + recent_velocity * 0.2  # Reduced influence
+    else:
+        predicted_centroid = weighted_centroid
         
-        if len(last_timestamps) >= 2:
-            # Calculate time differences
-            time_diffs = np.diff(last_timestamps)
-            
-            # Calculate velocity over time (pixels per second)
-            velocities = []
-            for i in range(len(time_diffs)):
-                if time_diffs[i] > 0:  # Avoid division by zero
-                    velocity = (np.array(last_positions[i+1]) - np.array(last_positions[i])) / time_diffs[i]
-                    velocities.append(velocity)
-                    
-            # Calculate angle velocity over time (degrees per second)
-            angle_velocities = []
-            for i in range(len(time_diffs)):
-                if time_diffs[i] > 0:
-                    angle_diff = last_angles[i+1] - last_angles[i]
-                    # Handle wraparound
-                    if angle_diff > 180:
-                        angle_diff -= 360
-                    elif angle_diff < -180:
-                        angle_diff += 360
-                        
-                    angle_velocity = angle_diff / time_diffs[i]
-                    angle_velocities.append(angle_velocity)
-            
-            # If we have velocities, use them for prediction
-            if velocities:
-                # Use weighted average of velocities
-                weights = np.exp(np.linspace(0, 1, len(velocities)))
-                weights = weights / np.sum(weights)
-                
-                weighted_velocity = np.zeros(2)
-                for i in range(len(velocities)):
-                    weighted_velocity += weights[i] * velocities[i]
-                    
-                # Time since last measurement
-                time_since_last = timestamp - last_timestamps[-1]
-                
-                # Predict position using velocity
-                predicted_centroid = tuple(np.array(centroids[-1]) + weighted_velocity * time_since_last)
-                
-                # Predict angle using angle velocity if available
-                if angle_velocities:
-                    weighted_angle_velocity = 0
-                    for i in range(len(angle_velocities)):
-                        weighted_angle_velocity += weights[i] * angle_velocities[i]
-                        
-                    predicted_angle = angles[-1] + weighted_angle_velocity * time_since_last
-                    predicted_angle = predicted_angle % 360
-    
     return predicted_centroid, predicted_angle
 
+# Add this helper function at the top
+def normalize_angle_degrees(angle):
+    return (angle % 360 + 360) % 360  # Ensures angle is always 0-360°
 
-def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, areas, openlengths, timestamps):
-    global skipped_counter
+def angle_difference(a1, a2):
+    a1 = normalize_angle_degrees(a1)
+    a2 = normalize_angle_degrees(a2)
+    # Returns smallest angle between two angles (0-180°)
+    diff = abs((a1 - a2) % 360)
+    return min(diff, 360 - diff)
+
+def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vectors, areas, openlengths, timestamps):
+    global skipped_counter, PixelToMM, previous_angle
     # Define maximum allowed deviation from prediction
     max_position_deviation = 200  # pixels
-    max_angle_deviation = 90  # degrees
+    max_angle_deviation = 10  # degrees
     global q,w,e,r,t,y
     
     kernel = np.ones((3,3))
     SEARCH_AREA = 175
     cropping = False
     bot_rect = None
-    area_threshold = 10.0e6  # 20% threshold for contour area change
+    area_threshold = 10.0  # 20% threshold for contour area change
     
     # Position and angle outlier rejection thresholds
-    position_threshold = 10.0e6 # Standard deviations
-    angle_threshold = 10.0e6     # Standard deviations
+    position_threshold = 100.0 # Standard deviations
+    angle_threshold = 100.0     # Standard deviations
     
     start_time = time.time()
     
@@ -279,7 +212,7 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
     predicted_centroid = None
     predicted_angle = None
     if len(centroids) >= 5 and cropping:
-        predicted_centroid, predicted_angle = predict_next_values(centroids, angles, timestamps[-1])
+        predicted_centroid, predicted_angle = predict_next_values(centroids, angle_vectors, timestamps[-1])
         if predicted_centroid is not None:
             cx, cy = predicted_centroid
             cv2.rectangle(crop_mask, (int(cx-SEARCH_AREA), int(cy-SEARCH_AREA)), 
@@ -324,18 +257,22 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                         is_outlier = False
                         if len(centroids) >= 5:
                                                         # Get prediction for this frame based on past measurements
-                            predicted_centroid, predicted_angle = predict_next_values(centroids, angles)
+                            predicted_centroid, predicted_angle = predict_next_values(centroids, angle_vectors) 
                             
-                            if predicted_centroid is not None:
+                            if predicted_centroid is not None and predicted_angle is not None:
                                 # Calculate distance to predicted position
                                 pred_cx, pred_cy = predicted_centroid
                                 distance_to_prediction = math.sqrt((cx - pred_cx)**2 + (cy - pred_cy)**2)
                                 
-                                # Calculate angle difference to prediction (handling wraparound)
-                                angle_diff = min(abs(angle - angles[-1]), abs((angle - 180) - angles[-1]))
-                                
-                                if angle_diff > 20 and False:
-                                    print(f"Angle outlier rejected: {angle:.1f}° - too far from previous: {angle_diff:.2f}°")
+                                # # Calculate angle difference to prediction (handling wraparound)
+                                if previous_angle is not None:
+                                    angle_diff = angle_diff = angle_difference(angle, previous_angle)
+                                else:
+                                    angle_diff = 0
+
+                                # print(angle)
+                                if angle_diff > 90:
+                                    print(f"Angle outlier rejected: {angle:.1f}° - Diff: {angle_diff:.2f}°")
                                     is_outlier = True
                                     skipped_counter +=1
                                     continue
@@ -344,7 +281,7 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                                 if distance_to_prediction > max_position_deviation:
                                     print(f"Position outlier rejected: ({cx:.1f}, {cy:.1f}) - too far from prediction: {distance_to_prediction:.2f}px")
                                     is_outlier = True
-                                    skipped_counter +=0.0001
+                                    skipped_counter +=1
                                     continue
                             
                             # Also perform traditional statistical outlier rejection
@@ -357,7 +294,7 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                                 if z_area > area_threshold:  # 3 standard deviations
                                     print(f"Area outlier rejected: {area:.0f} - z-score: {z_area:.2f}")
                                     is_outlier = True
-                                    skipped_counter +=0.000001
+                                    skipped_counter +=1
                                     continue 
                             # Calculate statistics for centroids
                             centroids_array = np.array(centroids)
@@ -374,15 +311,15 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                                 if z_x > position_threshold or z_y > position_threshold:
                                     print(f"Position outlier rejected: ({cx:.1f}, {cy:.1f}) - z-scores: x={z_x:.2f}, y={z_y:.2f}")
                                     is_outlier = True
-                                    skipped_counter +=0.00000001
+                                    skipped_counter +=1
                                     continue 
                                                                  
                     # Skip this contour if it's an outlier
                     if is_outlier:
                         openColor = (0, 0, 255)  # red
-                        if skipped_counter > 25:
+                        if skipped_counter > 10 and len(centroids) > 3:
                             centroids.pop(0)
-                            angles.pop(0)
+                            angle_vectors.pop(0)
                             areas.pop(0)
                         continue
                                             
@@ -393,7 +330,7 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                         break
                     else:
                         (avg_cx, avg_cy) = np.mean(centroids, axis=0)  
-                        avg_angle = np.mean(angles)
+                        avg_angle = np.mean(angle_vectors)
                         
                         # Accept the detection
                         bot_rect = rect
@@ -402,11 +339,10 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                         
                         if len(centroids) > 10:
                             centroids.pop(0)
-                            angles.pop(0)
+                            angle_vectors.pop(0)
                             areas.pop(0)   
                         break                     
-        
-        # The rest of the function remains the same
+
         if bot_rect:
             y+=1   
             thetas = []    
@@ -464,6 +400,68 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
             cv2.line(cvImage, tuple(map(int, baseline_pt1)), tuple(map(int, baseline_pt2)), 
                     (0, 0, 255), 2)  # Red line for baseline
             
+            # Add after calculating perp_vector but before grouping edges:
+
+            # Create masks for positive and negative sides
+            height, width = frame.shape[:2] if len(frame.shape) == 2 else frame.shape[:2]
+            pos_side_mask = np.zeros((height, width), dtype=np.uint8)
+            neg_side_mask = np.zeros((height, width), dtype=np.uint8)
+
+            # Convert simple_hull to format needed for fillPoly
+            hull_points = simple_hull.reshape((-1, 1, 2)).astype(np.int32)
+
+            # Create polygon points for positive and negative side
+            pos_side_points = []
+            neg_side_points = []
+
+            # Add centroid as first point for both polygons
+            pos_side_points.append([int(cx), int(cy)])
+            neg_side_points.append([int(cx), int(cy)])
+
+            # Add hull points to appropriate side based on which side of the baseline they fall
+            for point in simple_hull:
+                # Vector from centroid to point
+                to_point = point - centroid_point
+                # Project onto perpendicular vector to determine side
+                side = np.dot(to_point, perp_vector)
+                
+                if side > 0:
+                    pos_side_points.append([int(point[0]), int(point[1])])
+                else:
+                    neg_side_points.append([int(point[0]), int(point[1])])
+
+            # Create polygons from points if we have enough points
+            if len(pos_side_points) >= 3:
+                pos_side_poly = np.array([pos_side_points], dtype=np.int32)
+                cv2.fillPoly(pos_side_mask, pos_side_poly, 255)
+                
+            if len(neg_side_points) >= 3:
+                neg_side_poly = np.array([neg_side_points], dtype=np.int32)
+                cv2.fillPoly(neg_side_mask, neg_side_poly, 255)
+
+            # Calculate average brightness for each side
+            pos_side_avg = 0
+            neg_side_avg = 0
+            pos_pixels = np.sum(pos_side_mask > 0)
+            neg_pixels = np.sum(neg_side_mask > 0)
+
+            if pos_pixels > 0:
+                pos_side_avg = np.mean(frame[pos_side_mask > 0])
+                
+            if neg_pixels > 0:
+                neg_side_avg = np.mean(frame[neg_side_mask > 0])
+
+            # Determine which side is darker
+            darker_side = "positive" if pos_pixels < neg_pixels else "negative"
+
+            # Visualize the brightness calculation
+            cv2.putText(cvImage, f"Pos avg: {pos_side_avg:.1f}", (10, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 100, 250), 2)
+            cv2.putText(cvImage, f"Neg avg: {neg_side_avg:.1f}", (10, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (250, 100, 100), 2)
+            cv2.putText(cvImage, f"Darker: {darker_side}", (10, 180),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
             # Step 2: Find all edges (consecutive point pairs) around the hull
             edges = []
             for i in range(len(simple_hull)):
@@ -617,22 +615,31 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                 if neg_candidates:
                     best_neg_edge = neg_candidates[0]
             
-            # Step 5: If we found edges on both sides, use them
+            # Step 5: Modify to prefer edges from the darker side
             if best_pos_edge and best_neg_edge:
-                # Set the tips using our selected edges
-                tipl = best_pos_edge['pt1']
+                # Default behavior - use both sides
+                tipl = best_pos_edge['pt1'] 
                 tipr = best_pos_edge['pt2']
                 tip2l = best_neg_edge['pt1']
                 tip2r = best_neg_edge['pt2']
                 
-                # However, we want to find the smaller of these two edges
-                # The length of each edge
+                # Get the lengths
                 pos_edge_len = best_pos_edge['length']
                 neg_edge_len = best_neg_edge['length']
                 
-                # Choose the smaller edge as our tip pair
-                if neg_edge_len < pos_edge_len:
-                    tipl, tipr = tip2l, tip2r
+                # Choose the preferred side based on brightness
+                if darker_side == "positive":
+                    # Prefer positive side (should be tips), unless negative edge is much smaller
+                    if neg_edge_len < pos_edge_len * 0.7:  # Only use negative if it's significantly smaller
+                        tipl, tipr = tip2l, tip2r
+                else:
+                    # Prefer negative side (should be tips), unless positive edge is much smaller
+                    if pos_edge_len < neg_edge_len * 0.7:  # Only use positive if it's significantly smaller
+                        # Keep the default tipl, tipr from positive side
+                        pass
+                    else:
+                        # Use the darker negative side
+                        tipl, tipr = tip2l, tip2r
                 
                 # Calculate midpoint of tips for angle calculation
                 mid_tips = (tipl + tipr) / 2
@@ -644,47 +651,60 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
             # Draw the directional arrow (from base midpoint to tip midpoint)
             mid1_tuple = tuple(mid1.astype(int))
             mid2_tuple = tuple(mid2.astype(int))
-            cv2.arrowedLine(cvImage, mid2_tuple, mid1_tuple, openColor, 4)
         
             # Calculate angle from the direction vector
             v = mid1 - mid2  # Vector pointing from base to tips
             angle_vector = np.arctan2(v[1], v[0])
-            angle_vector = np.degrees(angle_vector)
+            angle_vector = normalize_angle_degrees(np.degrees(angle_vector))
             
             # Calculate statistics for angles
-            mean_angle = np.mean(angles)
-            std_angle = np.std(angles)
+            mean_angle = np.mean(angle_vectors) if len(angle_vectors) > 0 else angle_vector
+            std_angle = np.std(angle_vectors) if len(angle_vectors) > 0 else 1
             
+            angle_to_prediction = angle_difference(angle_vector, predicted_angle) if predicted_angle is not None else 0
             # Calculate smallest angle difference accounting for wraparound
-            angle_diff = min(abs(angle_vector - mean_angle), 360 - abs(angle_vector - mean_angle))
-            z_angle = angle_diff / std_angle if std_angle > 0 else 10
+            angle_diff = angle_difference(angle_vector, mean_angle)
             
-            if z_angle > angle_threshold:
-                print(f"Angle outlier rejected: {angle_vector:.1f}° - z-score: {z_angle:.2f}")
-                skipped_counter += 0.1
-                return cvImage, openColor, centroids, angles, areas, openlengths, timestamps
+            acceptable_deviation = max(5.0, std_angle * 2)  # Adapt to observed variability but cap it
+            if angle_diff > acceptable_deviation and angle_to_prediction > acceptable_deviation:
+                # Reject this angle as an outlier
+                print(f"Angle rejected: {angle_vector:.1f}°, Diff: {angle_diff:.2f}°, skipped:{skipped_counter}")
+                angle_vectors.append(angle_vectors[-1])
+                angle_color = [0,0,255] # red
+                skipped_counter +=1
+                # return cvImage, openColor, centroids, angles, areas, openlengths, timestamps
             else:
-                centroids.append((cx,cy))
-                areas.append(area)
-                angles.append(angle_vector)
-                timestamps.append(timestamp)
-                skipped_counter = 0
-                
+                angle_vectors.append(angle_vector)
+            if angle_diff > acceptable_deviation:
+                print(f"Angle deviation: {angle_vector:.1f}°, Diff: {angle_diff:.2f}°")
+            if angle_to_prediction > acceptable_deviation:
+                print(f"Angle prediction deviation: {angle_vector:.1f}°, Diff: {angle_to_prediction:.2f}°")
+
+            centroids.append((cx,cy))
+            areas.append(area)
+            timestamps.append(timestamp)
+            previous_angle = angle
+            skipped_counter = 0
+            angle_vectors.append(angle_vector)
+            angle_color = [0, 255, 0]  # green
+
             if len(tipl) != 0 and len(tipr) != 0:
-                openlength = np.linalg.norm(tipl - tipr)*1000/150 # Convert to um if needed, adjust scaling factor as per your calibration
+                openlength = np.linalg.norm(tipl - tipr)
+                openlengths.append(openlength)
                 if len(openlengths) >= 5:
-                    avg_openlength = np.mean(openlengths)
-                    std_openlength = np.std(openlengths)
-                    if std_openlength > 0:
-                        z_openlength = abs(openlength - avg_openlength) / std_openlength
-                        if z_openlength <= 5.0:  # Accept if within 3 standard deviations
-                            openlengths.append(openlength)
-                            openlengths.pop(0)
-                    else:
-                        openlengths.append(openlength)
-                        openlengths.pop(0)
-                else:
-                    openlengths.append(openlength)
+                    openlengths.pop(0)
+                #     avg_openlength = np.mean(openlengths)
+                #     std_openlength = np.std(openlengths)
+                #     if std_openlength > 0:
+                #         z_openlength = abs(openlength - avg_openlength) / std_openlength
+                #         if z_openlength <= 3.0:  # Accept if within 3 standard deviations
+                #             openlengths.append(openlength)
+                #             openlengths.pop(0)
+                #     else:
+                #         openlengths.append(openlength)
+                #         openlengths.pop(0)
+                # else:
+                    # openlengths.append(openlength)
                 # print(f"cx,cy:({cx},{cy})")
 
                 # Draw visualization elements
@@ -698,6 +718,9 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                 
                 # Draw centroid
                 cv2.circle(cvImage, centroidtuple, radius=6, color=(0, 225, 225), thickness=-1)
+                # Dreas midline
+                cv2.arrowedLine(cvImage, mid2_tuple, mid1_tuple, angle_color, 4)
+
                 # draw cordinate system
                 x = cvImage.shape[1] / 2  # Adjust x to have 0,0 at the center of the image
                 y = cvImage.shape[0] / 2  # Adjust y to have 0,0 at the center of the image
@@ -710,9 +733,9 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
                 cv2.circle(cvImage, (int(x), int(y)), radius=3, color=(225, 0, 0), thickness=-1)  # Origin point
 
                 # Add text showing the opening distance
-                cv2.putText(cvImage, f"Opening: {openlength:.1f}px", (10, 150),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-                
+                cv2.putText(cvImage, f"Opening: {openlength*PixelToMM*1000:.1f}um", (10, 150),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                    
             # Draw the contour outline
             cv2.drawContours(cvImage, [simple_hull.astype(np.int32)], 0, openColor, 2)
     else:
@@ -744,7 +767,7 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angles, area
     if USE_SAVED_PARAMS:
         cv2.putText(cvImage, "Using tuned parameters", (10, 60), 
                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-    return cvImage, openColor, centroids, angles, areas, openlengths, timestamps
+    return cvImage, openColor, centroids, angle_vectors, areas, openlengths, timestamps
 
 def publish_pose(publisher, x, y, theta, opening, timestamp=None):
         try:
@@ -753,7 +776,8 @@ def publish_pose(publisher, x, y, theta, opening, timestamp=None):
             # Convert to mm 
             x = x * PixelToMM
             y = y * PixelToMM
-            
+            opening = opening * PixelToMM*1000 # opening in um
+
             # convert to radians
             # print("theta", theta)
             theta = math.radians(-theta-90)
@@ -770,7 +794,7 @@ def publish_pose(publisher, x, y, theta, opening, timestamp=None):
             # Create message
             pose_msg = Float64MultiArray()
             pose_msg.data = [x, y, x, qx, qy, qz, qw, opening, timestamp.to_sec()]
-            
+            # print("pose_msg", pose_msg.data)
             # Publish the message
             publisher.publish(pose_msg)
         except Exception as e:
@@ -778,7 +802,7 @@ def publish_pose(publisher, x, y, theta, opening, timestamp=None):
 
 def image_callback(msg):
     bridge = CvBridge()
-    global centroids, angles, areas, publisher, openlengths, last_image_time, timestamps
+    global centroids, angle_vectors, areas, publisher, openlengths, last_image_time, timestamps
     
     # Update the last_image_time whenever we receive an image
     last_image_time = time.time()
@@ -793,16 +817,15 @@ def image_callback(msg):
         rospy.logerr("Image could not be read")
         return
     
-    processed_img, openColor, centroids, angles, areas, openlengths, timestamps = microgripperDetection(cv_image, timestamp_sec, openColor, centroids, angles, areas, openlengths, timestamps)
+    processed_img, openColor, centroids, angle_vectors, areas, openlengths, timestamps = microgripperDetection(cv_image, timestamp_sec, openColor, centroids, angle_vectors, areas, openlengths, timestamps)
     
     if (processed_img is not None and centroids):
-        if timestamps[-1] == timestamp_sec:
-            x = centroids[-1][0] - cv_image.shape[1] / 2  # Adjust x to have 0,0 at the center of the image
-            y = -centroids[-1][1] + cv_image.shape[0] / 2  # Adjust y to have 0,0 at the center of the image
-            publish_pose(publisher, x, y, angles[-1], openlengths[-1], timestamp)
-            cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA))
-            if cv2.waitKey(3) & 0xFF == ord(' '):
-                cv2.destroyAllWindows()
+        x = centroids[-1][0] - cv_image.shape[1] / 2  # Adjust x to have 0,0 at the center of the image
+        y = -centroids[-1][1] + cv_image.shape[0] / 2  # Adjust y to have 0,0 at the center of the image
+        publish_pose(publisher, x, y, angle_vectors[-1], openlengths[-1], timestamp)
+        cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA))
+        if cv2.waitKey(3) & 0xFF == ord(' '):
+            cv2.destroyAllWindows()
     # elif processed_img is not None:
     #     cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA))
 
@@ -811,15 +834,14 @@ def main():
     rospy.init_node('image_processor_node', anonymous=True)
     
     # Initialize global variables
-    global centroids, angles, prev_contour_area, publisher, areas, openlengths, last_image_time, timestamps
+    global centroids, angle_vectors, publisher, areas, openlengths, last_image_time, timestamps, previous_angle
     openlengths = [0]
     areas = []
     centroids = []
-    angles = []
+    angle_vectors = []
     timestamps = []
-    prev_contour_area = None
     last_image_time = time.time()
-    
+    previous_angle = None
     # Set up the timeout timer to check every 0.5 seconds
     rospy.Timer(rospy.Duration(0.5), timeout_callback)
     
