@@ -20,7 +20,7 @@ import cv2 # pip install opencv-python
 
 # Import saved parameters
 try:
-    from CVParameters1 import MICROGRIPPER_PARAMS
+    from CVParameters2 import MICROGRIPPER_PARAMS
     USE_SAVED_PARAMS = True
     print("Using saved parameters from CVParameters1.py")
 except ImportError:
@@ -116,6 +116,7 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
     max_angle_deviation = 10  # degrees
     global q,w,e,r,t,y
     
+    NUM_LARGEST = 6 # number of the largest contours to keep/check if robot
     kernel = np.ones((3,3))
     SEARCH_AREA = 175
     cropping = False
@@ -225,32 +226,36 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
                      (int(cx+2*SEARCH_AREA), int(cy+2*SEARCH_AREA)), 255, thickness=-1)
         edges = cv2.bitwise_and(edges, crop_mask)
 
-    contours, hierarchy = cv2.findContours(edges, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    contours = list(contours)
     current_contour_area = None
-    q+=1
     if contours:
-        #! error check contours size
-        sortedPairs = sorted(zip(contours, hierarchy[0]), key=lambda pair: cv2.contourArea(pair[0]), reverse=True)[:6]
-        contours, hierarchy = zip(*(sortedPairs)) # adjust number of accepted contours (10)
-        for i in range(0, len(contours)):
-            hull = cv2.convexHull(contours[i])
+        for i in range(0, min(len(contours),NUM_LARGEST)):
+            max_idx = max(range(len(contours)), key=lambda i: cv2.contourArea(contours[i]))
+            contour = contours[max_idx]
+            contours.pop(max_idx)
+            hull = cv2.convexHull(contour)
             simple_hull = cv2.approxPolyDP(hull, hull_epsilon * cv2.arcLength(hull, True), True)
             if len(simple_hull) >= min_hull_points and len(simple_hull) <= max_hull_points:
                 w+=1
-                rect = cv2.minAreaRect(contours[i])
+                rect = cv2.minAreaRect(contour)
                 (cx, cy), (width, height), angle = rect  
-                
-                # Ensure width is the longer dimension
+                M = cv2.moments(contour)
+                if False and M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                else:
+                    # Fallback if contour area is zero
+                    cx, cy = rect[0]                # Ensure width is the longer dimension
                 if width < height:
                     width, height = height, width
                 else:
                     angle = angle-90 
                 
-                area = cv2.contourArea(contours[i])
-                
+                area = cv2.contourArea(contour)
+                print (area)
                 # Apply aspect ratio and area constraints
                 if width < aspect_ratio*height and area < MAX_AREA and area > MIN_AREA:
-                    e+=1
                     # rest of the detection code remains the same
                     for j in [1]:
                         # Perform outlier rejection if we have enough history
@@ -291,7 +296,7 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
                             if std_area > 0:  # Avoid division by zero
                                 # Calculate z-score for area
                                 z_area = abs(area - mean_area) / std_area
-                                if z_area > area_threshold:  # 3 standard deviations
+                                if False and z_area > area_threshold:  # 3 standard deviations
                                     print(f"Area outlier rejected: {area:.0f} - z-score: {z_area:.2f}")
                                     is_outlier = True
                                     skipped_counter +=1
@@ -325,7 +330,6 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
                                             
                     if len(centroids) < 5:
                         bot_rect = rect
-                        bot_cnt = contours[i]
                         openColor = (0, 255, 0)  # green
                         break
                     else:
@@ -334,7 +338,6 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
                         
                         # Accept the detection
                         bot_rect = rect
-                        bot_cnt = contours[i]
                         openColor = (0, 255, 0)  # green
                         
                         if len(centroids) > 10:
@@ -665,8 +668,8 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
             # Calculate smallest angle difference accounting for wraparound
             angle_diff = angle_difference(angle_vector, mean_angle)
             
-            acceptable_deviation = max(5.0, std_angle * 2)  # Adapt to observed variability but cap it
-            if angle_diff > acceptable_deviation and angle_to_prediction > acceptable_deviation:
+            acceptable_deviation = max(10.0, std_angle * 2)  # Adapt to observed variability but cap it
+            if angle_diff > acceptable_deviation and angle_to_prediction > max_angle_deviation:
                 # Reject this angle as an outlier
                 print(f"Angle rejected: {angle_vector:.1f}°, Diff: {angle_diff:.2f}°, skipped:{skipped_counter}")
                 angle_vectors.append(angle_vectors[-1])
@@ -677,7 +680,7 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
                 angle_vectors.append(angle_vector)
             if angle_diff > acceptable_deviation:
                 print(f"Angle deviation: {angle_vector:.1f}°, Diff: {angle_diff:.2f}°")
-            if angle_to_prediction > acceptable_deviation:
+            if angle_to_prediction > max_angle_deviation:
                 print(f"Angle prediction deviation: {angle_vector:.1f}°, Diff: {angle_to_prediction:.2f}°")
 
             centroids.append((cx,cy))

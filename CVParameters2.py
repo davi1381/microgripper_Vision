@@ -1,26 +1,26 @@
 # Microgripper Detection Parameters
-# Generated on 2025-03-27 23:48:40
+# Generated on 2025-04-03 12:45:50
 
 MICROGRIPPER_PARAMS = {
-    'adaptive_block_size': 546,
-    'adaptive_constant': -9,
-    'erode_iterations': 3,
-    'dilate1_iterations': 9,
-    'erode2_iterations': 10,
-    'dilate2_iterations': 10,
-    'hull_epsilon': 0.02,
-    'min_hull_points': 4,
+    'adaptive_block_size': 566,
+    'adaptive_constant': -6,
+    'erode_iterations': 4,
+    'dilate1_iterations': 8,
+    'erode2_iterations': 4,
+    'dilate2_iterations': 0,
+    'hull_epsilon': 0.018,
+    'min_hull_points': 3,
     'max_hull_points': 10,
-    'aspect_ratio': 3.5,
-    'min_area': 28000.0,
-    'max_area': 100000.0,
+    'aspect_ratio': 1.9,
+    'min_area': 25000.0,
+    'max_area': 109000.0,
     'use_canny': False,
-    'canny_threshold1': 270,
-    'canny_threshold2': 243,
+    'canny_threshold1': 100,
+    'canny_threshold2': 200,
     'use_bilateral_filter': False,
-    'bilateral_d': 12,
-    'bilateral_sigma_color': 5,
-    'bilateral_sigma_space': 48,
+    'bilateral_d': 4,
+    'bilateral_sigma_color': 10,
+    'bilateral_sigma_space': 10,
 }
 
 def apply_parameters_to_image(image):

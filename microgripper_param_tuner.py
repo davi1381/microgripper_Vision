@@ -28,39 +28,43 @@ class MicrogripperParamTuner:
         self.root = root
         self.root.title("Microgripper Detection Parameter Tuner")
         self.root.geometry("800x600")
-        
-        # Parameters with default values
-        self.params = {
-            # Thresholding params
-            # Adaptive thresholding params
-            "adaptive_block_size": 135,
-            "adaptive_constant": -6,
-            
-            # Morphological operations
-            "erode_iterations": 1,
-            "dilate1_iterations": 5,
-            "erode2_iterations": 3,
-            "dilate2_iterations": 3,
-            
-            # Contour processing
-            "hull_epsilon": 0.013,
-            "min_hull_points": 3,
-            "max_hull_points": 15,
-            "aspect_ratio": 1.75,
-            "min_area": 25000,
-            "max_area": 100000,
-            
-            # Edge detection (alternative method)
-            "use_canny": False,
-            "canny_threshold1": 100,
-            "canny_threshold2": 200,
-            
-            # Other options
-            "use_bilateral_filter": False,
-            "bilateral_d": 5,
-            "bilateral_sigma_color": 10,
-            "bilateral_sigma_space": 10,
-        }
+        try:
+            from CVParameters2 import MICROGRIPPER_PARAMS
+            self.params = MICROGRIPPER_PARAMS
+            print("Using saved parameters from CVParameters1.py")
+        except ImportError:
+            # Parameters with default values
+            self.params = {
+                # Thresholding params
+                # Adaptive thresholding params
+                "adaptive_block_size": 135,
+                "adaptive_constant": -6,
+                
+                # Morphological operations
+                "erode_iterations": 1,
+                "dilate1_iterations": 5,
+                "erode2_iterations": 3,
+                "dilate2_iterations": 3,
+                
+                # Contour processing
+                "hull_epsilon": 0.013,
+                "min_hull_points": 3,
+                "max_hull_points": 15,
+                "aspect_ratio": 1.75,
+                "min_area": 25000,
+                "max_area": 100000,
+                
+                # Edge detection (alternative method)
+                "use_canny": False,
+                "canny_threshold1": 100,
+                "canny_threshold2": 200,
+                
+                # Other options
+                "use_bilat              eral_filter": False,
+                "bilateral_d": 5,
+                "bilateral_sigma_color": 10,
+                "bilateral_sigma_space": 10,
+            }
         
         # ROS-related variables
         self.ros_initialized = False
@@ -410,6 +414,11 @@ class MicrogripperParamTuner:
                     rect = cv2.minAreaRect(sorted_contours[i])
                     (cx, cy), (width, height), angle = rect
                     
+                    M = cv2.moments(sorted_contours[i])
+                    if M["m00"] != 0:
+                        cx2 = int(M["m10"] / M["m00"])
+                        cy2 = int(M["m01"] / M["m00"])
+
                     # Ensure width is the longer dimension
                     if width < height:
                         width, height = height, width
@@ -435,6 +444,8 @@ class MicrogripperParamTuner:
                         
                         # Draw the centroid
                         cv2.circle(result, (int(cx), int(cy)), 5, (255, 255, 0), -1)
+                        cv2.circle(result, (int(cx2), int(cy2)), 5, (255, 155, 0), -1)
+
                         
                         # Add text with details
                         text = f"Area: {area:.0f}, AR: {aspect_ratio:.2f}, Angle: {angle:.1f}"
