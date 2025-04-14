@@ -1,7 +1,10 @@
 # Microgripper Detection Parameters
 # Generated on 2025-04-03 12:45:50
+import numpy as np
+
 
 MICROGRIPPER_PARAMS = {
+    'kernel': np.ones((3, 3), np.uint8),
     'adaptive_block_size': 566,
     'adaptive_constant': -6,
     'erode_iterations': 4,
