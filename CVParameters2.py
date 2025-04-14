@@ -12,8 +12,8 @@ MICROGRIPPER_PARAMS = {
     'min_hull_points': 3,
     'max_hull_points': 10,
     'aspect_ratio': 1.9,
-    'min_area': 40000.0,
-    'max_area': 65000.0,
+    'min_area': 25000.0,
+    'max_area': 109000.0,
     'use_canny': False,
     'canny_threshold1': 100,
     'canny_threshold2': 200,
@@ -21,14 +21,6 @@ MICROGRIPPER_PARAMS = {
     'bilateral_d': 4,
     'bilateral_sigma_color': 10,
     'bilateral_sigma_space': 10,
-    "square_blur_size": 3,
-    "square_canny_threshold1": 100,
-    "square_canny_threshold2": 400,
-    "square_dilate_iterations": 1,
-    "square_min_area": 2000,
-    "square_max_area": 5000,
-    "square_aspect_ratio": 1.3,
-    "square_min_brightness": 150
 }
 
 def apply_parameters_to_image(image):
