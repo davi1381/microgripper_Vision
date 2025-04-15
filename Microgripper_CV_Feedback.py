@@ -32,7 +32,6 @@ last_timestamps = []
 last_positions = []
 last_angles = []
 skipped_counter = 0
-q,w,e,r,t,y = 0, 0, 0, 0, 0, 0  # Initialize counters for debugging 
 PixelToMM = 0.003187 # Conversion factor from pixels to mm (assuming 1600 pixels in width)
 
 # Apply scale correction factor to match simulation scale
@@ -111,12 +110,9 @@ def angle_difference(a1, a2):
 
 # --- Define HSV Color Ranges ---
 # You MUST tune these ranges for your specific fiducials and lighting conditions
-# Use a tool like HSV Color Picker (many online) or OpenCV code to find these values
-
-# Example: Red (Note: Red wraps around 0/180 in HSV)
-lower_red1 = np.array([0, 200, 200])
-upper_red1 = np.array([10, 255, 255])
-lower_red2 = np.array([170, 200, 200])
+lower_red1 = np.array([0, 150, 150])
+upper_red1 = np.array([20, 255, 255])
+lower_red2 = np.array([160, 150, 150])
 upper_red2 = np.array([180, 255, 255])
 
 # Minimum contour area to filter noise
@@ -473,6 +469,18 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
     return cvImage, openColor, centroids, angle_vectors, openlengths, timestamps
 
+def publish_image(image_publisher, image):
+    bridge = CvBridge()
+    try:
+        # Convert the image to a ROS message
+        ros_image = bridge.cv2_to_imgmsg(image, encoding="bgr8")
+        # Publish the image
+        image_publisher.publish(ros_image)
+    except Exception as e:
+        print(f"Error publishing image: {e}")
+
+
+
 def publish_pose(publisher, x, y, theta, opening, timestamp=None):
         try:
             # print(f"x,y:({x},{y})")
@@ -506,7 +514,7 @@ def publish_pose(publisher, x, y, theta, opening, timestamp=None):
 
 def image_callback(msg):
     bridge = CvBridge()
-    global centroids, angle_vectors, publisher, openlengths, last_image_time, timestamps
+    global centroids, angle_vectors, publisher, image_publisher, openlengths, last_image_time, timestamps
     
     # Update the last_image_time whenever we receive an image
     last_image_time = time.time()
@@ -527,6 +535,7 @@ def image_callback(msg):
         x = centroids[-1][0] - cv_image.shape[1] / 2  # Adjust x to have 0,0 at the center of the image
         y = -centroids[-1][1] + cv_image.shape[0] / 2  # Adjust y to have 0,0 at the center of the image
         publish_pose(publisher, x, y, angle_vectors[-1], openlengths[-1], timestamp)
+        #publish_image(image_publisher, processed_img)
         cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA))
         if cv2.waitKey(3) & 0xFF == ord(' '):
             cv2.destroyAllWindows()
@@ -538,7 +547,7 @@ def main():
     rospy.init_node('image_processor_node', anonymous=True)
     
     # Initialize global variables
-    global centroids, angle_vectors, publisher, openlengths, last_image_time, timestamps
+    global centroids, angle_vectors, publisher, image_publisher, openlengths, last_image_time, timestamps
     openlengths = [0]
     centroids = []
     angle_vectors = []
@@ -549,7 +558,8 @@ def main():
     
     rospy.Subscriber("/camera/basler_camera_1/image_raw", Image, image_callback)
     publisher = rospy.Publisher('/vision_feedback/pose_estimation', Float64MultiArray, queue_size=10)
-    
+    image_publisher = rospy.Publisher('/vision_feedback/image', Image, queue_size=10)
+    rospy.loginfo("MicroGripper Vision Feedback node started.")
     rospy.loginfo("MicroGripper Vision Feedback started. Will quit if no images received for {} seconds.".format(image_timeout))
     
     rospy.spin()   
