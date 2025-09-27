@@ -33,7 +33,7 @@ class MicrogripperParamTuner:
         try:
             from CVParameters3 import MICROGRIPPER_PARAMS
             self.params = MICROGRIPPER_PARAMS
-            print("Using saved parameters from CVParameters1.py")
+            print("Using saved parameters from CVParameters3.py")
         except ImportError:
             # Parameters with default values
             self.params = {

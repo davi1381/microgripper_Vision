@@ -22,7 +22,7 @@ import cv2 # pip install opencv-python
 try:
     from CVParameters3 import MICROGRIPPER_PARAMS
     USE_SAVED_PARAMS = True
-    print("Using saved parameters from CVParameters1.py")
+    print("Using saved parameters from CVParameters3.py")
 except ImportError:
     USE_SAVED_PARAMS = False
     print("No saved parameters found, using default parameters")
@@ -114,14 +114,18 @@ def angle_difference(a1, a2):
 # Use a tool like HSV Color Picker (many online) or OpenCV code to find these values
 
 # Example: Red (Note: Red wraps around 0/180 in HSV)
-lower_red1 = np.array([0, 200, 200])
-upper_red1 = np.array([10, 255, 255])
-lower_red2 = np.array([170, 200, 200])
-upper_red2 = np.array([180, 255, 255])
+lower_red1 = np.array([0, 10, 10])
+upper_red1 = np.array([0, 255, 255])
+lower_red2 = np.array([145, 100, 100])
+upper_red2 = np.array([170, 255, 255])
+# lower_red1 = np.array([12, 150, 150]) # yellow fiducials for imaging in DMEM
+# upper_red1 = np.array([35, 255, 255]) # yellow fiducials for imaging in DMEM
+# lower_red2 = np.array([180, 255, 255])# yellow fiducials for imaging in DMEM
+# upper_red2 = np.array([180, 255, 255]) # yellow fiducials for imaging in DMEM
+
 
 # Minimum contour area to filter noise
-MIN_FIDUCIAL_AREA = 100 # Adjust as needed
-
+MIN_FIDUCIAL_AREA = 50 # Adjust as needed
 def find_colored_fiducials(image):
     """
     Finds the two largest red fiducials in the image.
@@ -132,15 +136,17 @@ def find_colored_fiducials(image):
     hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
     # --- Process Red Fiducials ---
-    mask_red1 = cv2.inRange(hsv_image, lower_red1, upper_red1)
-    mask_red2 = cv2.inRange(hsv_image, lower_red2, upper_red2)
-    mask_red = cv2.bitwise_or(mask_red1, mask_red2) # Combine both red ranges
+    # mask_red1 = cv2.inRange(hsv_image, lower_red1, upper_red1)
+    mask_red = cv2.inRange(hsv_image, lower_red2, upper_red2)
+    # mask_red = cv2.bitwise_or(mask_red1, mask_red2) # Combine both red ranges
 
     # Clean up mask
     kernel = np.ones((5, 5), np.uint8)
     mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_OPEN, kernel)
     mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_CLOSE, kernel)
-
+    # cv2.imshow("Red Mask", mask_red)
+    # cv2.waitKey(1)
+    # Find contours in the red mask
     contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     # Find all red contours above the minimum area
@@ -153,7 +159,6 @@ def find_colored_fiducials(image):
 
     # Sort the valid contours by area in descending order
     valid_red_contours.sort(key=lambda x: x['area'], reverse=True)
-
     # Take the top two largest contours if they exist
     num_found = min(len(valid_red_contours), 2)
     for i in range(num_found):
@@ -352,8 +357,9 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
     
     
     # Display the edges for debugging
-    #cv2.imshow("Edges", edges)
-    
+    # cv2.imshow("Edges", edges)
+    # cv2.waitKey(1)
+
     # Create crop mask for region of interest
     crop_mask = np.zeros_like(edges)
     
@@ -392,7 +398,6 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
             timestamps.append(timestamp)        
             # Draw the contour outline
             cv2.drawContours(cvImage, [simple_hull.astype(np.int32)], 0, openColor, 2)
-
                 
             # Draw the centroid of the contour
             centroidtuple = tuple(map(int, [cx,cy]))
@@ -402,7 +407,6 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
                 # Use the centroid of the contour (cx, cy) as the center point for our baseline
                 centroid_point = np.array([cx, cy])
                 direction = fiducials_mid_point - centroid_point
-                
                 # Calculate angle from the direction vector
                 angle_vector = np.arctan2(direction[1], direction[0])
                 angle_vector = normalize_angle_degrees(np.degrees(angle_vector))
@@ -437,16 +441,20 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
                 if angle_vectors:  # Check if list is not empty
                     angle_vectors.append(angle_vectors[-1])
                 else:
-                    angle_vectors.append(angle_vector)            
+                    angle_vectors.append(0.0)  # Default to 0 if no previous angle   
         if simple_hull is None and len(fiducials) > 0:
             # If only one fiducial is found, we can still use it to estimate the position
             # but we won't have a valid angle vector
             cx, cy = fiducials[0][0]
+            if angle_vectors is not None and len(angle_vectors) > 0:
+                angle_vectors.append(angle_vectors[-1])
+            else:
+                angle_vectors.append(0.0)
             centroids.append((cx, cy))
             timestamps.append(timestamp)
             cv2.circle(cvImage, (int(cx), int(cy)), radius=7, color=(0, 255, 0), thickness=-1)
     else:
-        cv2.imshow("No contours found", cvImage)
+        # cv2.imshow("No contours found", cvImage)
         print("No robot contours found.")
         
     # Visualize prediction if available
@@ -504,9 +512,20 @@ def publish_pose(publisher, x, y, theta, opening, timestamp=None):
         except Exception as e:
             print(f"Error publishing pose: {e}")
 
+def publish_feedback_image(publisher,image,timestamp=None): 
+    try:
+        bridge = CvBridge()
+        img_msg = bridge.cv2_to_imgmsg(image, encoding="bgr8")
+        if timestamp is not None:
+            img_msg.header.stamp = timestamp
+        publisher.publish(img_msg)
+    except Exception as e:
+        print(f"Error publishing feedback image: {e}")
+        
+
 def image_callback(msg):
     bridge = CvBridge()
-    global centroids, angle_vectors, publisher, openlengths, last_image_time, timestamps
+    global centroids, angle_vectors, pose_publisher, openlengths, last_image_time, timestamps
     
     # Update the last_image_time whenever we receive an image
     last_image_time = time.time()
@@ -522,12 +541,13 @@ def image_callback(msg):
         return
     
     processed_img, openColor, centroids, angle_vectors, openlengths, timestamps = microgripperDetection(cv_image, timestamp_sec, openColor, centroids, angle_vectors, openlengths, timestamps)
-    
+
     if (processed_img is not None and centroids):
         x = centroids[-1][0] - cv_image.shape[1] / 2  # Adjust x to have 0,0 at the center of the image
         y = -centroids[-1][1] + cv_image.shape[0] / 2  # Adjust y to have 0,0 at the center of the image
-        publish_pose(publisher, x, y, angle_vectors[-1], openlengths[-1], timestamp)
-        cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA))
+        publish_pose(pose_publisher, x, y, angle_vectors[-1], openlengths[-1], timestamp)
+        publish_feedback_image(image_publisher, processed_img)
+        # cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA))
         if cv2.waitKey(3) & 0xFF == ord(' '):
             cv2.destroyAllWindows()
     # elif processed_img is not None:
@@ -538,7 +558,7 @@ def main():
     rospy.init_node('image_processor_node', anonymous=True)
     
     # Initialize global variables
-    global centroids, angle_vectors, publisher, openlengths, last_image_time, timestamps
+    global centroids, angle_vectors, pose_publisher, image_publisher, openlengths, last_image_time, timestamps
     openlengths = [0]
     centroids = []
     angle_vectors = []
@@ -548,8 +568,8 @@ def main():
     rospy.Timer(rospy.Duration(0.5), timeout_callback)
     
     rospy.Subscriber("/camera/basler_camera_1/image_raw", Image, image_callback)
-    publisher = rospy.Publisher('/vision_feedback/pose_estimation', Float64MultiArray, queue_size=10)
-    
+    pose_publisher = rospy.Publisher('/vision_feedback/pose_estimation', Float64MultiArray, queue_size=10)
+    image_publisher = rospy.Publisher('/vision_feedback/processed_image', Image, queue_size=10)
     rospy.loginfo("MicroGripper Vision Feedback started. Will quit if no images received for {} seconds.".format(image_timeout))
     
     rospy.spin()   
