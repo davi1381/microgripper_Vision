@@ -5,6 +5,8 @@ import math
 import numpy as np
 import time
 import sys
+from collections import deque
+import threading
 
 #ROS imports
 import rospy
@@ -39,6 +41,80 @@ PixelToMM = 0.003187 # Conversion factor from pixels to mm (assuming 1600 pixels
 # This value can be adjusted if the ROS image scale doesn't match the simulation scale
 scale_correction_factor = 1.0  # Adjust this value as needed to match simulation scale
 PixelToMM = PixelToMM * scale_correction_factor
+
+# --- GPU / OpenCL Acceleration Setup ---
+GPU_ENABLED = False  # will be set in setup_gpu()
+GPU_RUNTIME_OK = True  # new flag
+
+try:
+    import pyopencl as cl
+    _PYOPENCL_AVAILABLE = True
+except ImportError:
+    _PYOPENCL_AVAILABLE = False
+
+def _diagnose_opencv_opencl():
+    """Log minimal OpenCV build info related to OpenCL."""
+    try:
+        info = cv2.getBuildInformation()
+        lines = [l for l in info.split('\n') if 'OpenCL' in l or 'ocl' in l]
+        rospy.loginfo("OpenCV OpenCL build lines:\n" + "\n".join(lines[:15]))
+    except Exception as e:
+        rospy.logwarn(f"Could not extract OpenCV build info: {e}")
+
+def _diagnose_platforms():
+    if not _PYOPENCL_AVAILABLE:
+        rospy.logwarn("pyopencl not installed (pip install pyopencl) -> deeper diagnostics skipped.")
+        return
+    try:
+        plats = cl.get_platforms()
+        if not plats:
+            rospy.logwarn("No OpenCL platforms found by pyopencl.")
+            return
+        for p in plats:
+            rospy.loginfo(f"OpenCL Platform: {p.name} | Vendor: {p.vendor} | Version: {p.version}")
+            for d in p.get_devices():
+                rospy.loginfo(f"  Device: {d.name} | Type: {cl.device_type.to_string(d.type)} | Version: {d.version}")
+    except Exception as e:
+        rospy.logwarn(f"Error enumerating OpenCL platforms: {e}")
+
+
+def setup_gpu():
+    global GPU_ENABLED, GPU_RUNTIME_OK
+    use_gpu = rospy.get_param('~use_gpu', True)
+    have = cv2.ocl.haveOpenCL()
+    if use_gpu and have:
+        cv2.ocl.setUseOpenCL(True)
+        GPU_ENABLED = cv2.ocl.useOpenCL()
+        if GPU_ENABLED:
+            rospy.loginfo("OpenCL GPU acceleration enabled (OpenCV T-API).")
+        else:
+            rospy.logwarn("OpenCL reported present but could not activate cv2.ocl.useOpenCL().")
+    else:
+        GPU_ENABLED = False
+        rospy.loginfo("GPU acceleration disabled or OpenCL unavailable (using CPU).")
+    # Conditional diagnostics
+    if (not GPU_ENABLED and use_gpu):
+        rospy.loginfo("Running OpenCL diagnostics...")
+        _diagnose_opencv_opencl()
+        _diagnose_platforms()
+
+    # Runtime probe
+    if GPU_ENABLED:
+        GPU_RUNTIME_OK = _probe_opencl_runtime()
+        if not GPU_RUNTIME_OK:
+            rospy.logwarn("Disabling GPU due to OpenCL runtime failure (falling back to CPU).")
+            GPU_ENABLED = False
+
+def _probe_opencl_runtime():
+    """Try a tiny OpenCL operation; return True if success else False."""
+    try:
+        test = np.zeros((8,8), np.uint8)
+        u = cv2.UMat(test)
+        _ = cv2.GaussianBlur(u, (3,3), 0)  # simple kernel compile
+        return True
+    except Exception as e:
+        rospy.logwarn(f"OpenCL runtime probe failed: {e}")
+        return False
 
 # Global variable to track the time of the last received image
 last_image_time = time.time()
@@ -125,7 +201,7 @@ upper_red2 = np.array([170, 255, 255])
 
 
 # Minimum contour area to filter noise
-MIN_FIDUCIAL_AREA = 50 # Adjust as needed
+MIN_FIDUCIAL_AREA = 50 # Adjust as needed 
 def find_colored_fiducials(image):
     """
     Finds the two largest red fiducials in the image.
@@ -133,7 +209,11 @@ def find_colored_fiducials(image):
     or fewer items if not enough are found.
     """
     found_fiducials = []
-    hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    # Use GPU path for HSV if available
+    if GPU_ENABLED:
+        hsv_image = cv2.cvtColor(cv2.UMat(image), cv2.COLOR_BGR2HSV).get()
+    else:
+        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
     # --- Process Red Fiducials ---
     # mask_red1 = cv2.inRange(hsv_image, lower_red1, upper_red1)
@@ -157,12 +237,27 @@ def find_colored_fiducials(image):
              # Optional: Add shape filtering here (e.g., circularity)
             valid_red_contours.append({'contour': contour, 'area': area})
 
-    # Sort the valid contours by area in descending order
-    valid_red_contours.sort(key=lambda x: x['area'], reverse=True)
     # Take the top two largest contours if they exist
-    num_found = min(len(valid_red_contours), 2)
+    largest_red_contours = [None, None]  # To store the two largest contours
+    largest_area = 0
+    secnd_largest_area = 0
+    for contour in valid_red_contours:
+        area = contour['area']
+        if area > largest_area:
+            largest_red_contours[1] = largest_red_contours[0]  # Shift largest to second
+            largest_red_contours[0] = contour
+            secnd_largest_area = largest_area
+            largest_area = area
+        elif area > secnd_largest_area:
+            largest_red_contours[1] = contour
+            secnd_largest_area = area
+    if largest_red_contours[0] is not None:
+        num_found = len([c for c in largest_red_contours if c is not None])  # 1 or 2 depending on what was found
+    else:
+        num_found = 0
+
     for i in range(num_found):
-        contour_info = valid_red_contours[i]
+        contour_info = largest_red_contours[i]
         contour = contour_info['contour']
         M = cv2.moments(contour)
         if M["m00"] != 0:
@@ -218,7 +313,9 @@ def find_contour(contours,predicted_centroid=None):
                 angle = angle-90 
             
             area = cv2.contourArea(contour)
-            #print(area)
+            if (i==0):
+                print(area)
+
             # Apply aspect ratio and area constraints
             if width < aspect_ratio*height and area < MAX_AREA and area > MIN_AREA:
                 # Get prediction for this frame based on past measurements
@@ -236,12 +333,13 @@ def find_contour(contours,predicted_centroid=None):
 
 
 def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vectors, openlengths, timestamps):
-    global skipped_counter, PixelToMM
+    global skipped_counter, PixelToMM, crop_mask, GPU_ENABLED
+
     # Define maximum allowed deviation from prediction
     max_angle_deviation = 5  # degrees
    
-    SEARCH_AREA = 175
-    cropping = False
+    SEARCH_AREA = CROP_HALF_SIZE
+    cropping = ENABLE_CROPPING
     area_threshold = 10.0  # 20% threshold for contour area change
     
     # Position and angle outlier rejection thresholds
@@ -250,9 +348,18 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
     
     start_time = time.time()
     
-    # Convert image to grayscale
-    frame = cv2.cvtColor(cvImage, cv2.COLOR_BGR2GRAY)
-                    
+    # --- Grayscale (GPU UMat if enabled) ---
+    if GPU_ENABLED:
+        try:
+            u_bgr = cv2.UMat(cvImage)
+            frame = cv2.cvtColor(u_bgr, cv2.COLOR_BGR2GRAY)
+        except Exception as e:
+            rospy.logwarn(f"GPU path failed during grayscale ({e}); switching to CPU.")
+            GPU_ENABLED = False
+            frame = cv2.cvtColor(cvImage, cv2.COLOR_BGR2GRAY)
+    else:
+        frame = cv2.cvtColor(cvImage, cv2.COLOR_BGR2GRAY)
+
     # draw cordinate system
     x = cvImage.shape[1] / 2  # Adjust x to have 0,0 at the center of the image
     y = cvImage.shape[0] / 2  # Adjust y to have 0,0 at the center of the image
@@ -266,17 +373,19 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
     if USE_SAVED_PARAMS:
         # Apply bilateral filter if enabled
         if MICROGRIPPER_PARAMS['use_bilateral_filter']:
-            frame = cv2.bilateralFilter(
+            frame_proc = cv2.bilateralFilter(
                 frame,
                 MICROGRIPPER_PARAMS['bilateral_d'],
                 MICROGRIPPER_PARAMS['bilateral_sigma_color'],
                 MICROGRIPPER_PARAMS['bilateral_sigma_space']
             )
+        else:
+            frame_proc = frame
         
         # Edge detection
         if MICROGRIPPER_PARAMS['use_canny']:
             edges = cv2.Canny(
-                frame, 
+                frame_proc, 
                 MICROGRIPPER_PARAMS['canny_threshold1'],
                 MICROGRIPPER_PARAMS['canny_threshold2']
             )
@@ -287,7 +396,7 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
                 block_size += 1
                 
             edges = cv2.adaptiveThreshold(
-                frame,
+                frame_proc,
                 255,
                 cv2.ADAPTIVE_THRESH_MEAN_C,
                 cv2.THRESH_BINARY,
@@ -335,10 +444,9 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
         fiducials_mid_point = (f_center1 + f_center2) / 2
         openlength = np.linalg.norm(np.array(center1) - np.array(center2)) 
         openlengths.append(openlength)
-        if len(openlengths) >= 10:
-            openlengths.pop(0)
-
-         
+        # Removed manual trimming (deque auto-manages size). If it is still a list, slice it:
+        if not isinstance(openlengths, deque) and len(openlengths) > 10:
+            del openlengths[:-10]
 
         # Add text showing the opening distance
         cv2.putText(cvImage, f"Opening: {openlength*PixelToMM*1000:.1f}um", (10, 150),
@@ -360,35 +468,58 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
     # cv2.imshow("Edges", edges)
     # cv2.waitKey(1)
 
+    # Reuse crop_mask
+    if cropping:
+        if crop_mask is None or crop_mask.shape != cvImage.shape[:2]:
+            crop_mask = np.zeros(cvImage.shape[:2], dtype=np.uint8)
+        else:
+            crop_mask.fill(0)
+
     # Create crop mask for region of interest
-    crop_mask = np.zeros_like(edges)
-    
     predicted_centroid, predicted_angle = predict_next_values(centroids, angle_vectors) 
     # If we have predictions, use them for cropping to improve processing speed and accuracy
-    if len(centroids) >= 5 and cropping:
+    if cropping:
         if predicted_centroid is not None:
-            cx, cy = predicted_centroid
-            cv2.rectangle(crop_mask, (int(cx-SEARCH_AREA), int(cy-SEARCH_AREA)), 
-                         (int(cx+2*SEARCH_AREA), int(cy+2*SEARCH_AREA)), 255, thickness=-1)
-            edges = cv2.bitwise_and(edges, crop_mask)
-    elif cropping and centroids:
-        # Use the last known position if no prediction is available
-        cx, cy = centroids[-1]
-        cv2.rectangle(crop_mask, (int(cx-SEARCH_AREA), int(cy-SEARCH_AREA)), 
-                     (int(cx+2*SEARCH_AREA), int(cy+2*SEARCH_AREA)), 255, thickness=-1)
-        edges = cv2.bitwise_and(edges, crop_mask)
+            cxp, cyp = predicted_centroid
+        elif centroids:
+            cxp, cyp = centroids[-1]
+        else:
+            cxp, cyp = cvImage.shape[1]//2, cvImage.shape[0]//2
+        x1 = int(max(0, cxp - SEARCH_AREA))
+        y1 = int(max(0, cyp - SEARCH_AREA))
+        x2 = int(min(cvImage.shape[1], cxp + SEARCH_AREA))
+        y2 = int(min(cvImage.shape[0], cyp + SEARCH_AREA))
+        cv2.rectangle(crop_mask, (x1, y1), (x2, y2), 255, -1)
+        # If edges is UMat bring to host first for mask op
+        if GPU_ENABLED and isinstance(edges, cv2.UMat):
+            edges_host = edges.get()
+        else:
+            edges_host = edges
+        edges_host = cv2.bitwise_and(edges_host, edges_host, mask=crop_mask)
+    else:
+        predicted_centroid, predicted_angle = predict_next_values(centroids, angle_vectors)
+        if GPU_ENABLED and isinstance(edges, cv2.UMat):
+            edges_host = edges.get()
+        else:
+            edges_host = edges
 
-    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    # change from RETR_EXTERNAL to RETR_LIST if background noise is extreme
+    contours, _ = cv2.findContours(edges_host, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = list(contours)
     if contours is not None:
         (cx,cy), simple_hull = find_contour(contours)              
         if (skipped_counter > 10):
-            if len(centroids) > 3: centroids.pop(0)
-            if len(angle_vectors) > 3 :angle_vectors.pop(0)
-        if len(centroids) > 10:
-            centroids.pop(0)
-        if len(angle_vectors)>10:
-            angle_vectors.pop(0)
+            # discard oldest entries (was pop() removing newest)
+            if len(centroids) > 3:
+                if hasattr(centroids, 'popleft'):
+                    centroids.popleft()
+                else:
+                    centroids.pop(0)
+            if len(angle_vectors) > 3:
+                if hasattr(angle_vectors, 'popleft'):
+                    angle_vectors.popleft()
+                else:
+                    angle_vectors.pop(0)
         if simple_hull is None:
             openColor = (0, 0, 255)  # red
         else:
@@ -398,7 +529,6 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
             timestamps.append(timestamp)        
             # Draw the contour outline
             cv2.drawContours(cvImage, [simple_hull.astype(np.int32)], 0, openColor, 2)
-                
             # Draw the centroid of the contour
             centroidtuple = tuple(map(int, [cx,cy]))
             cv2.circle(cvImage, centroidtuple, radius=7, color=(0, 255, 0), thickness=-1)  # Green dot                    
@@ -479,16 +609,23 @@ def microgripperDetection(cvImage, timestamp, openColor, centroids, angle_vector
     if USE_SAVED_PARAMS:
         cv2.putText(cvImage, "Using tuned parameters", (10, 60), 
                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    
+    # At the overlay section (before return), add GPU status:
+    if GPU_ENABLED:
+        cv2.putText(cvImage, "GPU(OpenCL)", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 255, 100), 2)
+    if not GPU_ENABLED:
+        cv2.putText(cvImage, "CPU Mode", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 80, 255), 2)
+
     return cvImage, openColor, centroids, angle_vectors, openlengths, timestamps
 
 def publish_pose(publisher, x, y, theta, opening, timestamp=None):
         try:
             # print(f"x,y:({x},{y})")
 
-            # Convert to mm 
-            x = x * PixelToMM
-            y = y * PixelToMM
-            opening = opening * PixelToMM*1000 # opening in um
+            # Convert to mm using effective scale (handles downscaled processing)
+            x = x * PixelToMM_EFFECTIVE
+            y = y * PixelToMM_EFFECTIVE
+            opening = opening * PixelToMM_EFFECTIVE * 1000 # opening in um
 
             # convert to radians
             # print("theta", theta)
@@ -523,10 +660,49 @@ def publish_feedback_image(publisher,image,timestamp=None):
         print(f"Error publishing feedback image: {e}")
         
 
+# --- Performance control & stats (added) ---
+FRAME_SKIP = 0          # process every frame by default
+frame_counter = 0
+MAX_HISTORY = 15
+ENABLE_CROPPING = True
+CROP_HALF_SIZE = 175
+crop_mask = None
+# New scaling & threading params
+PROCESS_SCALE = 1.0
+PixelToMM_EFFECTIVE = PixelToMM  # updated if PROCESS_SCALE < 1
+LATEST_ONLY = False
+SHOW_GUI = False
+latest_frame = None
+latest_stamp = None
+processing_thread = None
+processing_thread_run = False
+processing_lock = threading.Lock()
+# FPS / latency stats
+fps_frame_count = 0
+fps_last_time = time.time()
+latency_sum = 0.0
+latency_count = 0
+
 def image_callback(msg):
-    bridge = CvBridge()
-    global centroids, angle_vectors, pose_publisher, openlengths, last_image_time, timestamps
-    
+    # Consolidated globals (bridge must appear before any use)
+    global frame_counter, fps_frame_count, fps_last_time, latency_sum, latency_count
+    global latest_frame, latest_stamp
+    global bridge, centroids, angle_vectors, pose_publisher, openlengths, last_image_time, timestamps
+
+    frame_counter += 1
+    if FRAME_SKIP > 0 and (frame_counter % (FRAME_SKIP + 1)) != 1:
+        return
+
+    if LATEST_ONLY:
+        try:
+            img = bridge.imgmsg_to_cv2(msg, "bgr8")
+        except:
+            return
+        with processing_lock:
+            latest_frame = img
+            latest_stamp = msg.header.stamp
+        return
+
     # Update the last_image_time whenever we receive an image
     last_image_time = time.time()
     
@@ -547,32 +723,135 @@ def image_callback(msg):
         y = -centroids[-1][1] + cv_image.shape[0] / 2  # Adjust y to have 0,0 at the center of the image
         publish_pose(pose_publisher, x, y, angle_vectors[-1], openlengths[-1], timestamp)
         publish_feedback_image(image_publisher, processed_img)
-        # cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA))
-        if cv2.waitKey(3) & 0xFF == ord(' '):
-            cv2.destroyAllWindows()
+        if SHOW_GUI:
+            cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA))
+            if cv2.waitKey(3) & 0xFF == ord(' '):
+                cv2.destroyAllWindows()
     # elif processed_img is not None:
     #     cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA))
 
+    # --- Latency & FPS accounting (added) ---
+    now_time = time.time()
+    frame_latency = now_time - timestamp_sec
+    latency_sum += frame_latency
+    latency_count += 1
+    fps_frame_count += 1
+    if now_time - fps_last_time >= 1.0:
+        interval = now_time - fps_last_time
+        fps = fps_frame_count / interval
+        avg_latency_ms = (latency_sum / max(1, latency_count)) * 1000.0
+        print(f"Vision FPS: {fps:.2f} | Avg Latency: {avg_latency_ms:.1f} ms | Frames: {fps_frame_count}")
+        fps_last_time = now_time
+        fps_frame_count = 0
+        latency_sum = 0.0
+        latency_count = 0
+
+# Processing loop for latest-only mode
+def processing_loop():
+    global latest_frame, latest_stamp
+    global fps_frame_count, fps_last_time, latency_sum, latency_count
+    while processing_thread_run and not rospy.is_shutdown():
+        frame = None
+        stamp = None
+        with processing_lock:
+            if latest_frame is not None:
+                frame = latest_frame.copy()
+                stamp = latest_stamp
+                latest_frame = None  # mark consumed
+        if frame is None:
+            time.sleep(0.001)
+            continue
+        # Apply processing scale
+        working = frame
+        scale_used = PROCESS_SCALE
+        if PROCESS_SCALE != 1.0:
+            working = cv2.resize(frame, None, fx=PROCESS_SCALE, fy=PROCESS_SCALE, interpolation=cv2.INTER_AREA)
+        # Prepare timestamp
+        if stamp is None:
+            stamp = rospy.Time.now()
+        stamp_sec = stamp.to_sec()
+        # Run detection
+        processed_img, _, _, _, _, _ = microgripperDetection(working, stamp_sec, (0,255,0), centroids, angle_vectors, openlengths, timestamps)
+        # Publish if we have data
+        if processed_img is not None and centroids:
+            # Last centroid (scaled); convert to original pixel coordinates for pose math
+            cx_scaled, cy_scaled = centroids[-1]
+            cx_full = cx_scaled
+            cy_full = cy_scaled
+            # (We adapt PixelToMM_EFFECTIVE globally, so no need to upscale coords for publishing)
+            x = cx_full - working.shape[1] / 2
+            y = -cy_full + working.shape[0] / 2
+            publish_pose(pose_publisher, x, y, angle_vectors[-1], openlengths[-1], stamp)
+            if SHOW_GUI:
+                cv2.imshow("Processed Image", cv2.resize(processed_img, None, fx=.5, fy=.5) if PROCESS_SCALE != 1.0 else processed_img)
+                cv2.waitKey(1)
+            publish_feedback_image(image_publisher, processed_img, stamp)
+        # Latency / FPS
+        now_time = time.time()
+        frame_latency = now_time - stamp_sec
+        latency_sum += frame_latency
+        latency_count += 1
+        fps_frame_count += 1
+        if now_time - fps_last_time >= 1.0:
+            interval = now_time - fps_last_time
+            fps = fps_frame_count / interval
+            avg_latency_ms = (latency_sum / max(1, latency_count)) * 1000.0
+            print(f"Vision FPS: {fps:.2f} | Avg Latency: {avg_latency_ms:.1f} ms | Frames: {fps_frame_count}")
+            fps_last_time = now_time
+            fps_frame_count = 0
+            latency_sum = 0.0
+            latency_count = 0
 
 def main():
     rospy.init_node('image_processor_node', anonymous=True)
-    
-    # Initialize global variables
-    global centroids, angle_vectors, pose_publisher, image_publisher, openlengths, last_image_time, timestamps
-    openlengths = [0]
-    centroids = []
-    angle_vectors = []
-    timestamps = []
+    setup_gpu()
+    # Load params
+    global FRAME_SKIP, MAX_HISTORY, ENABLE_CROPPING, CROP_HALF_SIZE
+    global PROCESS_SCALE, PixelToMM_EFFECTIVE, LATEST_ONLY, SHOW_GUI
+    FRAME_SKIP = rospy.get_param('~frame_skip', 0)
+    MAX_HISTORY = rospy.get_param('~max_history', 15)
+    ENABLE_CROPPING = rospy.get_param('~enable_cropping', True)
+    CROP_HALF_SIZE = rospy.get_param('~crop_half_size', 175)
+    PROCESS_SCALE = float(rospy.get_param('~process_scale', 1.0))
+    LATEST_ONLY = rospy.get_param('~latest_only', True)
+    SHOW_GUI = rospy.get_param('~show_gui', True)
+    if PROCESS_SCALE <= 0 or PROCESS_SCALE > 1.0:
+        PROCESS_SCALE = 1.0
+    # Adjust effective pixel size
+    global PixelToMM_EFFECTIVE
+    PixelToMM_EFFECTIVE = PixelToMM / PROCESS_SCALE
+    rospy.loginfo(f"process_scale={PROCESS_SCALE} | effective PixelToMM={PixelToMM_EFFECTIVE:.6f} mm/px | latest_only={LATEST_ONLY}")
+
+    # Initialize histories
+    global centroids, angle_vectors, pose_publisher, image_publisher, openlengths, last_image_time, timestamps, bridge
+    centroids = deque(maxlen=MAX_HISTORY)
+    angle_vectors = deque(maxlen=MAX_HISTORY)
+    openlengths = deque([0], maxlen=MAX_HISTORY)
+    timestamps = deque(maxlen=MAX_HISTORY)
+    bridge = CvBridge()
     last_image_time = time.time()
-    # Set up the timeout timer to check every 0.5 seconds
+
     rospy.Timer(rospy.Duration(0.5), timeout_callback)
-    
-    rospy.Subscriber("/camera/basler_camera_1/image_raw", Image, image_callback)
-    pose_publisher = rospy.Publisher('/vision_feedback/pose_estimation', Float64MultiArray, queue_size=10)
-    image_publisher = rospy.Publisher('/vision_feedback/processed_image', Image, queue_size=10)
+
+    rospy.Subscriber("/camera/basler_camera_1/image_raw", Image, image_callback, queue_size=1, buff_size=2**22)
+    pose_publisher = rospy.Publisher('/vision_feedback/pose_estimation', Float64MultiArray, queue_size=5)
+    image_publisher = rospy.Publisher('/vision_feedback/processed_image', Image, queue_size=2)
     rospy.loginfo("MicroGripper Vision Feedback started. Will quit if no images received for {} seconds.".format(image_timeout))
-    
-    rospy.spin()   
+
+    # Start processing thread if latest-only
+    global processing_thread, processing_thread_run
+    if LATEST_ONLY:
+        processing_thread_run = True
+        processing_thread = threading.Thread(target=processing_loop, daemon=True)
+        processing_thread.start()
+        rospy.loginfo("Latest-only processing thread started.")
+
+    rospy.spin()
+    # Cleanup
+    if LATEST_ONLY:
+        processing_thread_run = False
+        if processing_thread is not None:
+            processing_thread.join(timeout=1.0)
 
 if __name__ == "__main__":
     main()

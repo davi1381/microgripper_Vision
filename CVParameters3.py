@@ -15,7 +15,7 @@ MICROGRIPPER_PARAMS = {
     'min_hull_points': 3,
     'max_hull_points': 10,
     'aspect_ratio': 1.8,
-    'min_area': 40000.0,
+    'min_area': 35000.0,
     'max_area': 65000.0,
     'use_canny': False,
     'canny_threshold1': 100,
